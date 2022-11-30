@@ -1,4 +1,4 @@
-// Qiwei He 47771452 and Liwei Lu 90101531
+// yongqi liang 75181206
 
 #include <stdio.h>
 #include <sys/socket.h>
@@ -15,12 +15,14 @@
 #include <unistd.h>
 
 #define MAXLINE 8192 /* Max text line length */
-#define MAXBUF 8192  /* Max I/O buffer size */
+#define MAXBUF 8192  /* Max I/O tokens[1] size */
 #define LISTENQ 1024 /* Second argument to listen() */
+int clientfd = 0;
+int token_length = 0;
 
 int open_clientfd(char *hostname, char *port)
 {
-    int clientfd, rc;
+    int clientfd;
     struct addrinfo hints, *listp, *p;
 
     /* Get a list of potential server addresses */
@@ -28,11 +30,7 @@ int open_clientfd(char *hostname, char *port)
     hints.ai_socktype = SOCK_STREAM; /* Open a connection */
     hints.ai_flags = AI_NUMERICSERV; /* ... using a numeric port arg. */
     hints.ai_flags |= AI_ADDRCONFIG; /* Recommended for connections */
-    if ((rc = getaddrinfo(hostname, port, &hints, &listp)) != 0)
-    {
-        fprintf(stderr, "getaddrinfo failed (%s:%s): %s\n", hostname, port, gai_strerror(rc));
-        return -2;
-    }
+    getaddrinfo(hostname, port, &hints, &listp);
 
     /* Walk the list for one that we can successfully connect to */
     for (p = listp; p; p = p->ai_next)
@@ -44,11 +42,8 @@ int open_clientfd(char *hostname, char *port)
         /* Connect to the server */
         if (connect(clientfd, p->ai_addr, p->ai_addrlen) != -1)
             break; /* Success */
-        if (close(clientfd) < 0)
-        { /* Connect failed, try another */ // line:netp:openclientfd:closefd
-            fprintf(stderr, "open_clientfd: close failed: %s\n", strerror(errno));
-            return -1;
-        }
+
+        close(clientfd); /* Connect failed, try another */
     }
 
     /* Clean up */
@@ -59,14 +54,33 @@ int open_clientfd(char *hostname, char *port)
         return clientfd;
 }
 
-int clientfd = 0;
+char **split_line(char *line)
+{
+    token_length = 0;
+    int capacity = 16;
+
+    char **tokens = malloc(capacity * sizeof(char *));
+
+    char *delimiters = " \t\r\n";
+    char *token = strtok(line, delimiters);
+
+    while (token != NULL)
+    {
+        tokens[token_length] = token;
+        token_length++;
+        token = strtok(NULL, delimiters);
+    }
+    tokens[token_length] = NULL;
+    return tokens;
+}
+
 
 int main(int argc, const char *argv[])
 {
-    // insert code here...
     int i = 0;
-    char *host, *port, input[MAXLINE], buf2[MAXLINE], *buffer;
-    // rio_t rio;
+    char *host, *port, input[MAXLINE], line[MAXLINE];
+    char temp[MAXLINE];
+
     if (argc != 3)
     {
         fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
@@ -77,27 +91,28 @@ int main(int argc, const char *argv[])
     clientfd = open_clientfd(host, port);
     char *spliter = " \n";
     while (1)
-    { // while loop to get user input
+    { 
         for (i = 0; i < MAXLINE; i++)
         {
             input[i] = '\0';
-            buf2[i] = '\0';
+            line[i] = '\0';
         }
         printf("> ");
-        memset(input, 0, 80);
+        memset(input, 0, 200);
         fgets(input, (sizeof input / sizeof input[0]), stdin);
         if (input[strlen(input) - 1] == '\n')
+        {
             input[strlen(input) - 1] = 0;
-        strcpy(buf2, input);
-        if (strcmp(input, "quit") == 0)
+        }
+        strcpy(temp, input);
+        char **tokens = split_line(temp);
+        if (strcmp(tokens[0], "quit") == 0)
         {
             break;
         }
-        buffer = strtok(buf2, spliter);
-        if (strcmp(buffer, "openRead") == 0)
+        if (strcmp(tokens[0], "openRead") == 0)
         {
-            buffer = strtok(NULL, spliter);
-            if (buffer == NULL)
+            if (tokens[1] == NULL)
             {
                 printf("Invalid Syntax!\n");
                 continue;
@@ -107,10 +122,9 @@ int main(int argc, const char *argv[])
             fputs(input, stdout);
             continue;
         }
-        if (strcmp(buffer, "openAppend") == 0)
+        if (strcmp(tokens[0], "openAppend") == 0)
         {
-            buffer = strtok(NULL, spliter);
-            if (buffer == NULL)
+            if (tokens[1] == NULL)
             {
                 printf("Invalid Syntax!\n");
                 continue;
@@ -120,10 +134,9 @@ int main(int argc, const char *argv[])
             fputs(input, stdout);
             continue;
         }
-        if (strcmp(buffer, "read") == 0)
+        if (strcmp(tokens[0], "read") == 0)
         {
-            buffer = strtok(NULL, spliter);
-            if (buffer == NULL)
+            if (tokens[1] == NULL)
             {
                 printf("Invalid Syntax!\n");
                 continue;
@@ -133,10 +146,9 @@ int main(int argc, const char *argv[])
             fputs(input, stdout);
             continue;
         }
-        if (strcmp(buffer, "append") == 0)
+        if (strcmp(tokens[0], "append") == 0)
         {
-            buffer = strtok(NULL, spliter);
-            if (buffer == NULL)
+            if (tokens[1] == NULL)
             {
                 printf("Invalid Syntax!\n");
                 continue;
@@ -146,17 +158,15 @@ int main(int argc, const char *argv[])
             fputs(input, stdout);
             continue;
         }
-        if (strcmp(buffer, "close") == 0)
+        if (strcmp(tokens[0], "close") == 0)
         {
-            buffer = strtok(NULL, spliter);
             write(clientfd, input, strlen(input));
             read(clientfd, input, MAXLINE);
             fputs(input, stdout);
             continue;
         }
-        if(strcmp(buffer, "getHash") == 0){
-            buffer = strtok(NULL, spliter);
-            if (buffer == NULL)
+        if(strcmp(tokens[0], "getHash") == 0){
+            if (tokens[1] == NULL)
             {
                 printf("Invalid Syntax!\n");
                 continue;
@@ -171,8 +181,9 @@ int main(int argc, const char *argv[])
             printf("Invalid Syntax!\n");
             continue;
         }
+        free(tokens);
     }
-    close(clientfd); // line:netp:echoclient:close
+    close(clientfd); 
     exit(0);
     return 0;
 }

@@ -1,4 +1,4 @@
-// Qiwei He 47771452 and Liwei Lu 90101531
+// yongqi liang 75181206
 
 #include <stdio.h>
 #include <sys/socket.h>
@@ -23,13 +23,6 @@
 #define MAXBUF 8192  /* Max I/O buffer size */
 #define LISTENQ 1024 /* Second argument to listen() */
 
-#define APPENDING "a+"
-#define READING "r"
-
-#define EMPTY_STR ""
-
-int open_status; // 1 -> open 0 ->close
-
 typedef struct
 {
     int *buf;    /* Buffer array */
@@ -48,7 +41,33 @@ typedef struct
     FILE *fd;
     sem_t mutex[2]; // mutex[0] is for reading, mutex[1] is for writing
     int read_ref;   // number of reference
-} OFT_Entry;
+} FILES;
+
+sbuf_t sbuf; /* Shared buffer of connected descriptors */
+FILES file_table[4];
+sem_t OFT_mutex;
+int open_status; // 1 -> open 0 ->close
+int token_length;
+
+char **split_line(char *line)
+{
+    token_length = 0;
+    int capacity = 16;
+
+    char **tokens = malloc(capacity * sizeof(char *));
+
+    char *delimiters = " \t\r\n";
+    char *token = strtok(line, delimiters);
+
+    while (token != NULL)
+    {
+        tokens[token_length] = token;
+        token_length++;
+        token = strtok(NULL, delimiters);
+    }
+    tokens[token_length] = NULL;
+    return tokens;
+}
 
 void print_hash(unsigned char *digest)
 {
@@ -61,11 +80,6 @@ void print_hash(unsigned char *digest)
     }
     printf("\n");
 }
-
-void sbuf_init(sbuf_t *sp, int n);
-void sbuf_deinit(sbuf_t *sp);
-void sbuf_insert(sbuf_t *sp, int item);
-int sbuf_remove(sbuf_t *sp);
 
 /* Create an empty, bounded, shared FIFO buffer with n slots */
 /* $begin sbuf_init */
@@ -164,13 +178,6 @@ int open_listenfd(const char *port)
     return listenfd;
 }
 
-sbuf_t sbuf; /* Shared buffer of connected descriptors */
-OFT_Entry file_table[4];
-sem_t OFT_mutex;
-
-void echo(int connfd);
-void *thread(void *vargp);
-
 void OFT_init()
 {
     int i;
@@ -211,7 +218,7 @@ int openRead(char *filename)
     if (file_table[index].read_ref == 0)
     {
         // need to open file
-        file_table[index].fd = fopen(filename, READING);
+        file_table[index].fd = fopen(filename, "r");
         strcpy(file_table[index].filename, filename);
         // get the write lock
         sem_wait(&file_table[index].mutex[1]);
@@ -242,7 +249,7 @@ int openAppend(char *filename)
     }
     // get the write lock
     sem_wait(&file_table[index].mutex[1]);
-    file_table[index].fd = fopen(filename, APPENDING);
+    file_table[index].fd = fopen(filename, "a+");
     strcpy(file_table[index].filename, filename);
 
     sem_post(&OFT_mutex);
@@ -250,39 +257,224 @@ int openAppend(char *filename)
     return index;
 }
 
-void read_file(char *buf, int size, int OFT_index, int position)
+void read_file(char *buf, int size, int File_Index, int position)
 {
     sem_wait(&OFT_mutex);
-    fseek(file_table[OFT_index].fd, position, SEEK_SET);
-    fgets(buf, size + 1, file_table[OFT_index].fd);
+    fseek(file_table[File_Index].fd, position, SEEK_SET);
+    fgets(buf, size + 1, file_table[File_Index].fd);
     sem_post(&OFT_mutex);
     return;
 }
 
-void append_file(char *buf, int OFT_index)
+void append_file(char *buf, int File_Index)
 {
-    fputs(buf, file_table[OFT_index].fd);
+    fputs(buf, file_table[File_Index].fd);
     return;
 }
 
-void close_file(int OFT_index)
+void close_file(int File_Index)
 {
-    // printf("Closing File on index %d which has %d client in use.\n", OFT_index, file_table[OFT_index].read_ref);
+    // printf("Closing File on index %d which has %d client in use.\n", File_Index, file_table[File_Index].read_ref);
     sem_wait(&OFT_mutex);
-    if (file_table[OFT_index].read_ref > 1)
+    if (file_table[File_Index].read_ref > 1)
     {
-        file_table[OFT_index].read_ref--;
+        file_table[File_Index].read_ref--;
         sem_post(&OFT_mutex);
         return;
     }
-    if (file_table[OFT_index].read_ref <= 1)
+    if (file_table[File_Index].read_ref <= 1)
     {
-        file_table[OFT_index].read_ref = 0;
-        fclose(file_table[OFT_index].fd);
-        memset(&file_table[OFT_index].filename, 0, MAXLINE);
-        sem_post(&file_table[OFT_index].mutex[1]);
+        file_table[File_Index].read_ref = 0;
+        fclose(file_table[File_Index].fd);
+        memset(&file_table[File_Index].filename, 0, MAXLINE);
+        sem_post(&file_table[File_Index].mutex[1]);
         sem_post(&OFT_mutex);
         return;
+    }
+}
+
+void clear(char *input, char *output,char *buf2)
+{
+    for (int i = 0; i < MAXLINE; i++)
+    {
+        input[i] = '\0';
+        output[i] = '\0';
+        output[i + 1] = '\0';
+        buf2[i] = '\0';
+    }
+}
+
+void echo(int connfd)
+{
+    size_t n;
+    int i = 0;
+    char input[MAXLINE];
+    char output[MAXLINE + 1];
+    char buffer[MAXLINE];
+    int file_opened = 0;
+    int index;
+    int read_position = 0;
+    char temp[MAXLINE];
+    while ((n = read(connfd, input, MAXLINE)) != 0)
+    {
+        printf("%s\n", input);
+        strcpy(temp, input);
+        char **tokens = split_line(temp);
+        //buffer = strtok(input, spliter);
+
+        if (strcmp(tokens[0], "getHash") == 0)
+        {
+            //filename = strtok(NULL, spliter);
+            //printf("Received getHash from connfd %d for file %s\n", connfd, filename);
+            unsigned char digest[16]; //  a buffer to store the hash into
+            MDFile(tokens[1], digest); // calculate the hash again)
+
+            if (open_status == 0)
+            {
+                print_hash(digest);
+                unsigned char *hash = digest;
+                sprintf(buffer, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n", hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]);
+                sprintf(output, "%s", buffer);
+                write(connfd, output, strlen(output) + 1);
+                clear(input, output, buffer);
+                continue;
+            }
+            else
+            {
+                strcpy(buffer, "A file is already open for appending\n");
+                sprintf(output, "%s", buffer);
+                write(connfd, output, strlen(output) + 1);
+                clear(input, output, buffer);
+                continue;
+            }
+        }
+
+        if (strcmp(tokens[0], "openRead") == 0)
+        {
+            if (file_opened)
+            {
+                sem_wait(&OFT_mutex);
+                if (file_table[index].read_ref)
+                {
+                    strcpy(buffer, "A file is already open for reading\n");
+                }
+                else
+                {
+                    strcpy(buffer, "A file is already open for appending\n");
+                }
+                sem_post(&OFT_mutex);
+                sprintf(output, "%s", buffer);
+                printf("%s", buffer);
+                write(connfd, output, strlen(output) + 1);
+                clear(input, output, buffer);
+                continue;
+            }
+           // filename = strtok(NULL, spliter);
+            index = openRead(tokens[1]);
+            if (index == -1)
+            {
+                strcpy(buffer, "The file is open by another client.\n");
+                sprintf(output, "%s", buffer);
+                printf("%s", buffer);
+                write(connfd, output, strlen(output) + 1);
+                clear(input, output, buffer);
+                continue;
+            }
+            // file_table[0].fd = fopen(filename, "r");
+            file_opened = 1;
+            strcpy(buffer, ""); // file opened
+            sprintf(output, "%s", buffer);
+            write(connfd, output, strlen(output) + 1);
+            clear(input, output, buffer);
+            continue;
+        }
+        if (strcmp(tokens[0], "openAppend") == 0)
+        {
+            open_status = 1;
+            if (file_opened)
+            {
+                clear(input, output, buffer);
+                sem_wait(&OFT_mutex);
+                if (file_table[index].read_ref)
+                {
+                    strcpy(buffer, "A file is already open for reading\n");
+                }
+                else
+                {
+                    strcpy(buffer, "A file is already open for appending\n");
+                }
+                sem_post(&OFT_mutex);
+                sprintf(output, "%s", buffer);
+                printf("%s", buffer);
+                write(connfd, output, strlen(output) + 1);
+                clear(input, output, buffer);
+                continue;
+            }
+            //filename = strtok(NULL, spliter);
+            index = openAppend(tokens[1]);
+            if (index == -1)
+            {
+                strcpy(buffer, "The file is open by another client.\n");
+                sprintf(output, "%s", buffer);
+                printf("%s", buffer);
+                write(connfd, output, strlen(output) + 1);
+                clear(input, output, buffer);
+                continue;
+            }
+            file_opened = 1;
+            strcpy(output, ""); // file opened
+            write(connfd, output, strlen(output) + 1);
+            // file_table[0].fd = fopen(filename, "a+");
+            clear(input, output, buffer);
+            continue;
+        }
+
+        if (strcmp(tokens[0], "read") == 0)
+        {
+            //buffer = strtok(NULL, spliter);
+            int readlen = atoi(tokens[1]);
+            clear(input, output, buffer);
+            if (file_opened == 0)
+            {
+                strcpy(output, "File not open\n");
+                printf("File not open\n");
+            }
+            else
+            {
+                read_file(buffer, readlen, index, read_position);
+                read_position += readlen;
+                // fgets(buf2, readlen, file_table[0].fd);
+                sprintf(output, "%s\n", buffer);
+            }
+        }
+
+        if (strcmp(tokens[0], "append") == 0)
+        {
+            //buffer = strtok(NULL, spliter);
+            if (file_opened == 0)
+            {
+                strcpy(output, "File not open\n");
+                printf("File not open\n");
+            }
+            else
+            {
+                append_file(tokens[1], index);
+                strcpy(output, "");
+            }
+            // fputs(buffer, file_table[0].fd);
+        }
+
+        if (strcmp(tokens[0], "close") == 0)
+        {
+            close_file(index);
+            file_opened = 0;
+            open_status = 0;
+            read_position = 0;
+            strcpy(output, "");
+        }
+
+        write(connfd, output, strlen(output) + 1);
+        clear(input, output, buffer);
     }
 }
 
@@ -296,253 +488,20 @@ void *thread(void *vargp)
         // printf("Connected\n");
         close(connfd);
     }
-};
+}
 
-void echo(int connfd)
+void sigchld_handler(int sig)
 {
-    size_t n;
-    int i = 0;
-    char input[MAXLINE];
-    char *filename;
-    char *buffer;
-    char *spliter = " \n";
-    char output[MAXLINE + 1];
-    char buf2[MAXLINE];
-    int opened;
-    int index;
-    int read_position;
-    opened = 0;
-    read_position = 0;
-    while ((n = read(connfd, input, MAXLINE)) != 0)
-    {
-        printf("%s\n", input);
-        buffer = strtok(input, spliter);
 
-        if (strcmp(buffer, "getHash") == 0)
-        {
-            filename = strtok(NULL, spliter);
-            printf("Received getHash from connfd %d for file %s\n", connfd, filename);
-            unsigned char digest[16]; //  a buffer to store the hash into
-            MDFile(filename, digest); // calculate the hash again)
+    while (waitpid(-1, 0, WNOHANG) > 0)
 
-            if (open_status == 0)
-            {
-                print_hash(digest);
-                unsigned char *hash = digest;
-                sprintf(buf2, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n", hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]);
-                sprintf(output, "%s", buf2);
-                write(connfd, output, strlen(output) + 1);
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                continue;
-            }
-            else
-            {
-                strcpy(buf2, "A file is already open for appending\n");
-                sprintf(output, "%s", buf2);
-                write(connfd, output, strlen(output) + 1);
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                continue;
-            }
-        }
+        ;
 
-        if (strcmp(buffer, "openRead") == 0)
-        {
-            if (opened)
-            {
-                sem_wait(&OFT_mutex);
-                if (file_table[index].read_ref)
-                {
-                    strcpy(buf2, "A file is already open for reading\n");
-                }
-                else
-                {
-                    strcpy(buf2, "A file is already open for appending\n");
-                }
-                sem_post(&OFT_mutex);
-                sprintf(output, "%s", buf2);
-                printf("%s", buf2);
-                write(connfd, output, strlen(output) + 1);
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                continue;
-            }
-            filename = strtok(NULL, spliter);
-            index = openRead(filename);
-            if (index == -1)
-            {
-                strcpy(buf2, "The file is open by another client.\n");
-                sprintf(output, "%s", buf2);
-                printf("%s", buf2);
-                write(connfd, output, strlen(output) + 1);
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                continue;
-            }
-            // file_table[0].fd = fopen(filename, "r");
-            opened = 1;
-            strcpy(buf2, ""); // file opened
-            sprintf(output, "%s", buf2);
-            write(connfd, output, strlen(output) + 1);
-            for (i = 0; i < MAXLINE; i++)
-            {
-                input[i] = '\0';
-                output[i] = '\0';
-                output[i + 1] = '\0';
-                buf2[i] = '\0';
-            }
-            continue;
-        }
-        if (strcmp(buffer, "openAppend") == 0)
-        {
-            open_status = 1;
-            if (opened)
-            {
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                sem_wait(&OFT_mutex);
-                if (file_table[index].read_ref)
-                {
-                    strcpy(buf2, "A file is already open for reading\n");
-                }
-                else
-                {
-                    strcpy(buf2, "A file is already open for appending\n");
-                }
-                sem_post(&OFT_mutex);
-                sprintf(output, "%s", buf2);
-                printf("%s", buf2);
-                write(connfd, output, strlen(output) + 1);
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                continue;
-            }
-            filename = strtok(NULL, spliter);
-            index = openAppend(filename);
-            if (index == -1)
-            {
-                strcpy(buf2, "The file is open by another client.\n");
-                sprintf(output, "%s", buf2);
-                printf("%s", buf2);
-                write(connfd, output, strlen(output) + 1);
-                for (i = 0; i < MAXLINE; i++)
-                {
-                    input[i] = '\0';
-                    output[i] = '\0';
-                    output[i + 1] = '\0';
-                    buf2[i] = '\0';
-                }
-                continue;
-            }
-            opened = 1;
-            strcpy(output, ""); // file opened
-            write(connfd, output, strlen(output) + 1);
-            // file_table[0].fd = fopen(filename, "a+");
-            for (i = 0; i < MAXLINE; i++)
-            {
-                input[i] = '\0';
-                output[i] = '\0';
-                output[i + 1] = '\0';
-                buf2[i] = '\0';
-            }
-            continue;
-        }
-
-        if (strcmp(buffer, "read") == 0)
-        {
-            buffer = strtok(NULL, spliter);
-            int readlen = atoi(buffer);
-            for (i = 0; i < MAXLINE; i++)
-            {
-                input[i] = '\0';
-                output[i] = '\0';
-                output[i + 1] = '\0';
-                buf2[i] = '\0';
-            }
-            if (opened == 0)
-            {
-                strcpy(output, "File not open\n");
-                printf("File not open\n");
-            }
-            else
-            {
-                read_file(buf2, readlen, index, read_position);
-                read_position += readlen;
-                // fgets(buf2, readlen, file_table[0].fd);
-                sprintf(output, "%s\n", buf2);
-            }
-        }
-
-        if (strcmp(buffer, "append") == 0)
-        {
-            buffer = strtok(NULL, spliter);
-            if (opened == 0)
-            {
-                strcpy(output, "File not open\n");
-                printf("File not open\n");
-            }
-            else
-            {
-                append_file(buffer, index);
-                strcpy(output, EMPTY_STR);
-            }
-            // fputs(buffer, file_table[0].fd);
-        }
-
-        if (strcmp(buffer, "close") == 0)
-        {
-            close_file(index);
-            opened = 0;
-            open_status = 0;
-            read_position = 0;
-            strcpy(output, EMPTY_STR);
-        }
-
-        write(connfd, output, strlen(output) + 1);
-        for (i = 0; i < MAXLINE; i++)
-        {
-            input[i] = '\0';
-            output[i] = '\0';
-            output[i + 1] = '\0';
-            buf2[i] = '\0';
-        }
-    }
-};
+    return;
+}
 
 int main(int argc, const char *argv[])
 {
-    // insert code here...
     printf("server started\n");
     OFT_init();
     int i, listenfd, connfd;
@@ -554,6 +513,7 @@ int main(int argc, const char *argv[])
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
         exit(0);
     }
+    signal(SIGCHLD, sigchld_handler);
     listenfd = open_listenfd(argv[1]);
     sbuf_init(&sbuf, SBUFSIZE);                                // line:conc:pre:initsbuf
     for (i = 0; i < NTHREADS; i++) /* Create worker threads */ // line:conc:pre:begincreate
